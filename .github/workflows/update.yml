@@ -1,0 +1,184 @@
+name: Update Nodes (Clash/V2Ray/Sing-box)
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # 每天 UTC 0点 (北京时间早8点) 运行
+  workflow_dispatch:     # 允许手动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Dependencies
+        run: |
+          pip install requests pyyaml
+
+      - name: Run Update Script
+        env:
+          SUB_URLS: ${{ secrets.SUB_URLS }}
+          CLASH_OUTPUT: 'uploads/clash.yaml'
+          V2RAY_OUTPUT: 'uploads/v2ray.txt'
+          SINGBOX_OUTPUT: 'uploads/singbox.json'
+        run: |
+          python3 << 'EOF'
+import os
+import requests
+import yaml
+import base64
+import json
+import re
+from urllib.parse import urlparse, parse_qs
+
+def decode_base64(data):
+    missing_padding = len(data) % 4
+    if missing_padding:
+        data += '=' * (4 - missing_padding)
+    try:
+        return base64.b64decode(data).decode('utf-8')
+    except:
+        return ""
+
+def parse_v2ray_line(line):
+    """简单解析常见协议链接为字典，用于转换"""
+    try:
+        if line.startswith('vmess://'):
+            content = decode_base64(line[8:])
+            data = json.loads(content)
+            return {
+                'type': 'vmess',
+                'tag': data.get('ps', 'unnamed-vmess'),
+                'server': data.get('add'),
+                'server_port': int(data.get('port')),
+                'uuid': data.get('id'),
+                'alter_id': int(data.get('aid', 0)),
+                'security': data.get('scy', 'auto'),
+                'transport': {
+                    'type': data.get('net', 'tcp'),
+                    'path': data.get('path', ''),
+                    'headers': {'Host': data.get('host', '')} if data.get('host') else None
+                }
+            }
+        elif line.startswith('vless://'):
+            # vless://uuid@host:port?params#name
+            parsed = urlparse(line)
+            query = parse_qs(parsed.query)
+            return {
+                'type': 'vless',
+                'tag': parsed.fragment or 'unnamed-vless',
+                'server': parsed.hostname,
+                'server_port': parsed.port,
+                'uuid': parsed.username,
+                'flow': query.get('flow', [''])[0],
+                'packet_encoding': 'xudp',
+                'transport': {
+                    'type': query.get('type', ['tcp'])[0],
+                    'path': query.get('path', [''])[0],
+                    'service_name': query.get('serviceName', [''])[0],
+                    'headers': {'Host': query.get('host', [''])[0]} if query.get('host') else None
+                }
+            }
+        elif line.startswith('trojan://'):
+            parsed = urlparse(line)
+            query = parse_qs(parsed.query)
+            return {
+                'type': 'trojan',
+                'tag': parsed.fragment or 'unnamed-trojan',
+                'server': parsed.hostname,
+                'server_port': parsed.port,
+                'password': parsed.username,
+                'tls': {'enabled': True, 'insecure': True}, 
+                'transport': {
+                    'type': query.get('type', ['tcp'])[0],
+                    'path': query.get('path', [''])[0],
+                    'service_name': query.get('serviceName', [''])[0]
+                }
+            }
+        elif line.startswith('ss://'):
+            # 处理 ss:// 格式 (有的带#name, 有的是 base64)
+            raw = line[5:]
+            if '#' in raw:
+                info, tag = raw.rsplit('#', 1)
+            else:
+                info, tag = raw, 'unnamed-ss'
+            
+            # 尝试解码 user:pass@host:port
+            try:
+                decoded_info = decode_base64(info.split('@')[0])
+                method, password = decoded_info.split(':', 1)
+                host_port = info.split('@')[1]
+                host, port = host_port.rsplit(':', 1)
+                return {
+                    'type': 'shadowsocks',
+                    'tag': tag,
+                    'server': host,
+                    'server_port': int(port),
+                    'method': method,
+                    'password': password
+                }
+            except:
+                return None # 复杂格式暂跳过
+        return None
+    except Exception as e:
+        return None
+
+def fetch_and_convert():
+    sub_urls = os.environ.get('SUB_URLS', '')
+    if not sub_urls:
+        print("❌ 未找到订阅链接")
+        return [], [], []
+
+    clash_nodes = []
+    v2ray_lines = []
+    singbox_outbounds = []
+
+    urls = [u.strip() for u in sub_urls.split('\n') if u.strip()]
+    
+    for url in urls:
+        try:
+            print(f"正在获取: {url}")
+            resp = requests.get(url, timeout=15)
+            if resp.status_code == 200:
+                content = resp.text
+                
+                # 1. 处理 Clash 格式 (YAML)
+                if 'proxies:' in content:
+                    try:
+                        data = yaml.safe_load(content)
+                        if data and 'proxies' in data:
+                            clash_nodes.extend(data['proxies'])
+                            # 尝试将 Clash 节点转为 Singbox 格式 (简单映射)
+                            for p in data['proxies']:
+                                sb_node = convert_clash_to_singbox(p)
+                                if sb_node:
+                                    singbox_outbounds.append(sb_node)
+                    except Exception as e:
+                        print(f"解析 YAML 失败: {e}")
+                
+                # 2. 处理 Base64 列表格式
+                else:
+                    decoded = decode_base64(content)
+                    lines = []
+                    if 'proxies:' in decoded:
+                         # 解码后是 YAML
+                         try:
+                            data = yaml.safe_load(decoded)
+                            if data and 'proxies' in data:
+                                clash_nodes.extend(data['proxies'])
+                                for p in data['proxies']:
+                                    sb_node = convert_clash_to_singbox(p)
+                                    if sb_node:
+                                        singbox_outbounds.append(sb_node)
+                         except: pass
+                    else:
+                        # 解码后是链接列表
+                        lines = decoded.split('\n')
+                    
+                    # 如果原始内容就是链接列表 (
