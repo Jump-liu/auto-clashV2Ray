@@ -2,8 +2,8 @@ name: Update Nodes (Clash/V2Ray/Sing-box)
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # 每天 UTC 0点 (北京时间早8点) 运行
-  workflow_dispatch:     # 允许手动触发
+    - cron: '0 0 * * *'
+  workflow_dispatch:
 
 jobs:
   build:
@@ -38,7 +38,6 @@ import re
 import random
 from urllib.parse import urlparse, parse_qs
 
-# 模拟真实客户端的 User-Agent 池，防止被机场屏蔽
 USER_AGENTS = [
     "ClashMetaForAndroid/2.8.9",
     "ClashForWindows/0.20.0",
@@ -57,7 +56,6 @@ def decode_base64(data):
     if missing_padding:
         data += '=' * (4 - missing_padding)
     try:
-        # 尝试 URL Safe 解码
         return base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
     except:
         try:
@@ -66,7 +64,6 @@ def decode_base64(data):
             return ""
 
 def convert_clash_to_singbox(clash_node):
-    """将 Clash 格式节点转换为 Singbox 格式"""
     try:
         node_type = clash_node.get('type')
         if not node_type:
@@ -79,7 +76,6 @@ def convert_clash_to_singbox(clash_node):
             "server_port": clash_node.get('port')
         }
         
-        # 通用 TLS 设置
         if clash_node.get('tls') or node_type in ['trojan', 'vless', 'hysteria', 'hysteria2']:
             sb_node['tls'] = {
                 "enabled": True,
@@ -148,25 +144,22 @@ def convert_clash_to_singbox(clash_node):
                 sb_node['up_mbps'] = clash_node.get('up', 100)
                 sb_node['down_mbps'] = clash_node.get('down', 100)
                 sb_node['obfs'] = clash_node.get('obfs', '')
-            else: # hysteria2
+            else:
                 sb_node['obfs'] = {
                     "type": clash_node.get('obfs-type', 'salamander'),
                     "password": clash_node.get('obfs-password', '')
                 }
         else:
-            return None # 不支持的类型
+            return None
             
-        # 清理空值
         if 'tls' in sb_node and not sb_node['tls'].get('enabled'):
             del sb_node['tls']
             
         return sb_node
     except Exception as e:
-        # print(f"转换节点失败: {e}")
         return None
 
 def parse_v2ray_line(line):
-    """解析 V2Ray 链接为字典"""
     try:
         line = line.strip()
         if not line: return None
@@ -259,7 +252,6 @@ def fetch_and_convert():
                 print("⚠️ 返回内容为空或过短")
                 continue
 
-            # 1. 尝试解析 Clash YAML
             if 'proxies:' in content:
                 try:
                     data = yaml.safe_load(content)
@@ -270,14 +262,12 @@ def fetch_and_convert():
                         for p in data['proxies']:
                             sb = convert_clash_to_singbox(p)
                             if sb: singbox_outbounds.append(sb)
-                    continue # 处理完 YAML 跳过后续逻辑
+                    continue
                 except Exception as e:
                     print(f"⚠️ YAML 解析失败，尝试 Base64: {e}")
 
-            # 2. 尝试 Base64 解码
             decoded = decode_base64(content)
             
-            # 如果解码后包含 proxies，说明是 Base64 包裹的 YAML
             if 'proxies:' in decoded:
                 try:
                     data = yaml.safe_load(decoded)
@@ -291,7 +281,6 @@ def fetch_and_convert():
                     continue
                 except: pass
             
-            # 3. 按行处理链接列表
             lines = decoded.split('\n') if decoded else content.split('\n')
             valid_lines_count = 0
             for line in lines:
@@ -303,7 +292,6 @@ def fetch_and_convert():
                 
                 parsed = parse_v2ray_line(line)
                 if parsed:
-                    # 构建 Singbox 节点
                     sb = {
                         "tag": parsed.get('tag'),
                         "type": parsed['type'],
@@ -356,13 +344,11 @@ def main():
 
     os.makedirs('uploads', exist_ok=True)
 
-    # 1. 保存 Clash
     if clash_nodes:
         with open(os.environ['CLASH_OUTPUT'], 'w', encoding='utf-8') as f:
             yaml.dump({'proxies': clash_nodes}, f, allow_unicode=True, default_flow_style=False)
         print(f"📄 Clash 已保存: {len(clash_nodes)} 个节点")
     
-    # 2. 保存 V2Ray (Base64)
     if v2ray_lines:
         raw = '\n'.join(v2ray_lines)
         encoded = base64.b64encode(raw.encode('utf-8')).decode('utf-8')
@@ -370,7 +356,6 @@ def main():
             f.write(encoded)
         print(f"📄 V2Ray 已保存: {len(v2ray_lines)} 个节点 (Base64)")
 
-    # 3. 保存 Sing-box (完整配置)
     if singbox_outbounds:
         config = {
             "log": {"level": "info", "timestamp": True},
